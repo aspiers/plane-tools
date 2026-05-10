@@ -131,9 +131,37 @@ if options[:apply] && !options[:yes]
   log.info "sync-mode confirmation accepted"
 end
 
+# Adaptive rate-limit pacing. Plane returns `X-RateLimit-Remaining`
+# (calls left in the current window) and `X-RateLimit-Reset` (epoch
+# seconds when the bucket refills). When remaining drops below the
+# safety threshold, we sleep until just after reset so we don't hit
+# 429s mid-burst.
+class RateLimitPacer < Faraday::Middleware
+  THRESHOLD = 5
+
+  def on_complete(env)
+    remaining = env.response_headers["x-ratelimit-remaining"]&.to_i
+    reset = env.response_headers["x-ratelimit-reset"]&.to_i
+    return unless remaining && reset && remaining < THRESHOLD
+
+    sleep_for = (reset - Time.now.to_i) + 1
+    return if sleep_for <= 0
+
+    warn "[rate-limit] remaining=#{remaining}, sleeping #{sleep_for}s until window reset"
+    sleep(sleep_for)
+  end
+end
+
 plane = Faraday.new(url: PLANE_BASE) do |f|
-  f.request :retry, max: 3, interval: 0.5, backoff_factor: 2,
-                    retry_statuses: [429, 502, 503, 504]
+  # Default `methods` only includes idempotent verbs (GET, HEAD, etc.).
+  # Our POST/PATCH calls ARE idempotent (matched by external_id), so
+  # tell Faraday to retry them too. Plane returns HTTP 429 on rate
+  # limits; faraday-retry honors Retry-After automatically and acts as
+  # a safety net under the proactive pacer below.
+  f.request :retry, max: 6, interval: 0.5, backoff_factor: 2,
+                    retry_statuses: [429, 502, 503, 504],
+                    methods: %i[get head post patch delete]
+  f.use RateLimitPacer
   f.request :json
   f.response :json, content_type: /\bjson$/
   f.headers["X-API-Key"] = PLANE_TOKEN
