@@ -61,7 +61,7 @@ this step has to be manual via the Plane UI:
 Requires Ruby ~> 3.3 and bundler.
 
 ```bash
-git clone https://github.com/<your-fork>/plane-tools
+git clone https://github.com/aspiers/plane-tools
 cd plane-tools
 bundle install
 
