@@ -239,7 +239,11 @@ end
 
 def render_body(gh_comment)
   ts = gh_comment.created_at.strftime("%Y-%m-%d %H:%M UTC")
-  header = "<p><a href=\"#{gh_comment.html_url}\" target=\"_blank\" rel=\"noopener\">" \
+  # Note: clicking this link in Plane currently opens two browser
+  # tabs - reproducible even on links authored inside Plane's own
+  # editor, regardless of target/rel/class attributes. Plane bug;
+  # accepting it here because two tabs beats no link at all.
+  header = "<p><a href=\"#{gh_comment.html_url}\">" \
            "<em>#{gh_comment.user.login} wrote on GitHub on #{ts}</em>" \
            "</a></p>"
   rendered = Commonmarker.to_html(
