@@ -12,8 +12,8 @@
 #
 # - Skips comments authored by GitHub Apps (e.g. makeplane).
 # - Skips work items whose GH issue is not open.
-# - Renders GH markdown to HTML via Redcarpet for the Plane
-#   `comment_html` field.
+# - Renders GH markdown to HTML via Commonmarker (cmark-gfm) for the
+#   Plane `comment_html` field. Same engine GitHub uses server-side.
 #
 # Usage:
 #   bundle exec bin/import-gh-comments-to-plane [--project ID]
@@ -31,7 +31,7 @@ require "dotenv"
 require "octokit"
 require "faraday"
 require "faraday/retry"
-require "redcarpet"
+require "commonmarker"
 require "yaml"
 require "optparse"
 require "json"
@@ -142,11 +142,17 @@ end
 
 gh = Octokit::Client.new(access_token: GH_TOKEN, auto_paginate: true)
 
-renderer = Redcarpet::Markdown.new(
-  Redcarpet::Render::HTML.new(hard_wrap: true, link_attributes: { target: "_blank", rel: "noopener" }),
-  fenced_code_blocks: true, autolink: true, tables: true, strikethrough: true,
-  no_intra_emphasis: true, lax_spacing: true
-)
+# GFM-flavoured options matching GitHub's server-side renderer.
+# `header_ids: nil` suppresses the auto-generated <a id=...> anchors on
+# headings (Plane has no use for them and they pollute the rendering).
+COMMONMARKER_OPTS = {
+  parse: { smart: false },
+  render: { hardbreaks: false, github_pre_lang: true, unsafe: true },
+  extension: { header_ids: nil }
+}.freeze
+COMMONMARKER_PLUGINS = {
+  syntax_highlighter: nil
+}.freeze
 
 # --- helpers ---------------------------------------------------------------
 
@@ -203,13 +209,31 @@ def patch_comment(faraday, slug, project_id, work_item_id, comment_id, payload) 
   resp.body
 end
 
-def render_body(renderer, gh_comment)
+def render_body(gh_comment)
   ts = gh_comment.created_at.strftime("%Y-%m-%d %H:%M UTC")
   header = "<p><a href=\"#{gh_comment.html_url}\" target=\"_blank\" rel=\"noopener\">" \
            "<em>#{gh_comment.user.login} wrote on GitHub on #{ts}</em>" \
            "</a></p>"
-  rendered = renderer.render(gh_comment.body.to_s).strip
-  header + rendered
+  rendered = Commonmarker.to_html(
+    gh_comment.body.to_s, options: COMMONMARKER_OPTS, plugins: COMMONMARKER_PLUGINS
+  ).strip
+  collapse_whitespace(header + rendered)
+end
+
+# Plane's editor renders any whitespace it sees in our HTML literally:
+# `\n` between tags becomes a phantom blank paragraph, `\n` inside text
+# becomes a forced line break. Collapse all runs of whitespace to a
+# single space EXCEPT inside <pre>...</pre> where line breaks matter.
+def collapse_whitespace(html)
+  parts = html.split(%r{(<pre[^>]*>.*?</pre>)}m)
+  parts.each_with_index do |part, i|
+    next if i.odd? # odd indices are the <pre>...</pre> blocks; preserve verbatim
+
+    # Collapse runs of whitespace (including \n) to a single space, then
+    # remove that space where it sits between adjacent tags.
+    parts[i] = part.gsub(/\s+/, " ").gsub(/>\s+</, "><")
+  end
+  parts.join
 end
 
 # --- main ------------------------------------------------------------------
@@ -285,7 +309,7 @@ PROJECT_REPOS.each do |proj_identifier, repo|
         next
       end
 
-      rendered = render_body(renderer, c)
+      rendered = render_body(c)
       existing_plane = by_gh_id[cid]
 
       if existing_plane.nil?
