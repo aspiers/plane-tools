@@ -1,0 +1,7 @@
+.env
+config/plane_github_map.yml
+tmp/
+*.log
+
+.bundle/
+vendor/bundle/

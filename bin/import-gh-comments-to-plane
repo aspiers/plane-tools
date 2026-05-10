@@ -1,0 +1,343 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# rubocop:disable Metrics/BlockLength -- top-level script, linear flow over shared state
+
+# Mirror GitHub issue comments into corresponding Plane work items.
+#
+# Iterates Plane work items that are linked to GitHub issues
+# (external_source=GITHUB). For each such work item, fetches the
+# linked GH issue's comments and POSTs any that aren't already
+# present in Plane (matched by external_id == GH comment id).
+#
+# - Skips comments authored by GitHub Apps (e.g. makeplane).
+# - Skips work items whose GH issue is not open.
+# - Renders GH markdown to HTML via Redcarpet for the Plane
+#   `comment_html` field.
+#
+# Usage:
+#   bundle exec bin/import-gh-comments-to-plane [--project ID]
+#                                                [--issue NUM]
+#                                                [--limit N]
+#                                                [--apply]
+#
+# Defaults to dry-run. Pass --apply to actually POST.
+#
+# Required env (from .env):
+#   PLANE_API_TOKEN, PLANE_WORKSPACE_SLUG, PLANE_BASE_URL, GITHUB_TOKEN
+
+require "bundler/setup"
+require "dotenv"
+require "octokit"
+require "faraday"
+require "faraday/retry"
+require "redcarpet"
+require "yaml"
+require "optparse"
+require "json"
+require "logger"
+require "fileutils"
+
+env_path = File.expand_path("../.env", __dir__)
+unless File.exist?(env_path)
+  warn "error: #{env_path} not found"
+  warn "       copy .env.example to .env and fill in your Plane + GitHub credentials."
+  exit 1
+end
+Dotenv.load(env_path)
+
+options = {
+  project: nil,
+  issue: nil,
+  limit: nil,
+  apply: false,
+  yes: false
+}
+OptionParser.new do |op|
+  op.banner = "Usage: bin/import-gh-comments-to-plane [options]"
+  op.on("--project ID", "Restrict to one Plane project identifier (e.g. D4D)") { |v| options[:project] = v }
+  op.on("--issue NUM", Integer, "Restrict to one GH issue number") { |v| options[:issue] = v }
+  op.on("--limit N", Integer, "Stop after N comments would-be/are POSTed (across all work items)") do |v|
+    options[:limit] = v
+  end
+  op.on("--apply", "Actually POST/PATCH. Without this, runs as dry-run.") { options[:apply] = true }
+  op.on("--yes", "Skip the interactive sync-mode confirmation prompt (for unattended runs)") do
+    options[:yes] = true
+  end
+  op.on("-h", "--help") do
+    puts op
+    exit 0
+  end
+end.parse!
+
+PLANE_TOKEN = ENV.fetch("PLANE_API_TOKEN")
+PLANE_SLUG  = ENV.fetch("PLANE_WORKSPACE_SLUG")
+PLANE_BASE  = ENV.fetch("PLANE_BASE_URL", "https://api.plane.so")
+GH_TOKEN    = ENV.fetch("GITHUB_TOKEN") { `gh auth token`.strip }
+raise "no GitHub token (set GITHUB_TOKEN or run gh auth login)" if GH_TOKEN.empty?
+
+FileUtils.mkdir_p("tmp")
+log_path = "tmp/import-gh-comments.log"
+log_file = File.open(log_path, "a")
+log_file.sync = true
+
+class TeeIO
+  def initialize(*ios) = (@ios = ios)
+  def write(*args) = @ios.each { |io| io.write(*args) }
+  def close = @ios.each(&:close)
+  def flush = @ios.each(&:flush)
+  # Logger probes/sets `sync`; names match the IO contract.
+  def sync = true # rubocop:disable Naming/PredicateMethod
+  def sync=(_v); end # rubocop:disable Naming/MethodParameterName
+end
+
+log = Logger.new(TeeIO.new($stdout, log_file))
+log.formatter = ->(sev, time, _prog, msg) { "[#{time.strftime('%H:%M:%S')} #{sev}] #{msg}\n" }
+
+map_path = File.expand_path("../config/plane_github_map.yml", __dir__)
+unless File.exist?(map_path)
+  warn "error: #{map_path} not found"
+  warn "       copy config/plane_github_map.example.yml to config/plane_github_map.yml " \
+       "and edit it for your projects."
+  exit 1
+end
+PROJECT_REPOS = YAML.load_file(map_path)
+log.info "loaded project map: #{PROJECT_REPOS.inspect}"
+log.info "MODE: #{options[:apply] ? 'APPLY (will POST/PATCH)' : 'DRY-RUN (no writes)'}"
+
+if options[:apply] && !options[:yes]
+  $stdout.puts <<~WARN
+
+    ============================================================
+    BEFORE PROCEEDING:
+      In Plane, set the GitHub integration sync mode for this
+      workspace to UNIDIRECTIONAL (GitHub -> Plane only).
+      Otherwise the imported comments may round-trip back to
+      GitHub and pollute the original GH comment bodies.
+
+    AFTER this script finishes, restore BIDIRECTIONAL sync.
+
+    Type 'unidirectional' to confirm sync is currently OFF
+    (Plane -> GitHub disabled), or anything else to abort:
+    ============================================================
+  WARN
+  $stdout.print "> "
+  $stdout.flush
+  reply = $stdin.gets&.strip
+  unless reply == "unidirectional"
+    log.error "aborted: confirmation not given (got #{reply.inspect})"
+    exit 1
+  end
+  log.info "sync-mode confirmation accepted"
+end
+
+plane = Faraday.new(url: PLANE_BASE) do |f|
+  f.request :retry, max: 3, interval: 0.5, backoff_factor: 2,
+                    retry_statuses: [429, 502, 503, 504]
+  f.request :json
+  f.response :json, content_type: /\bjson$/
+  f.headers["X-API-Key"] = PLANE_TOKEN
+  f.headers["Accept"] = "application/json"
+end
+
+gh = Octokit::Client.new(access_token: GH_TOKEN, auto_paginate: true)
+
+renderer = Redcarpet::Markdown.new(
+  Redcarpet::Render::HTML.new(hard_wrap: true, link_attributes: { target: "_blank", rel: "noopener" }),
+  fenced_code_blocks: true, autolink: true, tables: true, strikethrough: true,
+  no_intra_emphasis: true, lax_spacing: true
+)
+
+# --- helpers ---------------------------------------------------------------
+
+def paged(faraday, path, params = {})
+  results = []
+  cursor = nil
+  loop do
+    p = params.merge(per_page: 100)
+    p[:cursor] = cursor if cursor
+    resp = faraday.get(path, p)
+    raise "GET #{path} -> #{resp.status}: #{resp.body.inspect[0, 300]}" unless resp.success?
+
+    body = resp.body
+    rows = body.is_a?(Hash) ? (body["results"] || []) : Array(body)
+    results.concat(rows)
+    cursor = body.is_a?(Hash) ? body["next_cursor"] : nil
+    break if cursor.nil? || cursor.to_s.empty? || rows.empty?
+    # Defensive: some Plane endpoints echo same cursor when no more pages.
+    break if body.is_a?(Hash) && body["next_cursor"] == body["prev_cursor"]
+  end
+  results
+end
+
+def list_projects(faraday, slug)
+  paged(faraday, "/api/v1/workspaces/#{slug}/projects/")
+end
+
+def list_github_work_items(faraday, slug, project_id)
+  paged(faraday, "/api/v1/workspaces/#{slug}/projects/#{project_id}/work-items/",
+        external_source: "GITHUB")
+end
+
+def list_comments(faraday, slug, project_id, work_item_id)
+  paged(faraday, "/api/v1/workspaces/#{slug}/projects/#{project_id}/work-items/#{work_item_id}/comments/")
+end
+
+def post_comment(faraday, slug, project_id, work_item_id, payload)
+  resp = faraday.post(
+    "/api/v1/workspaces/#{slug}/projects/#{project_id}/work-items/#{work_item_id}/comments/",
+    payload
+  )
+  raise "POST comment -> #{resp.status}: #{resp.body.inspect[0, 500]}" unless resp.success?
+
+  resp.body
+end
+
+def patch_comment(faraday, slug, project_id, work_item_id, comment_id, payload) # rubocop:disable Metrics/ParameterLists
+  resp = faraday.patch(
+    "/api/v1/workspaces/#{slug}/projects/#{project_id}/work-items/#{work_item_id}/comments/#{comment_id}/",
+    payload
+  )
+  raise "PATCH comment -> #{resp.status}: #{resp.body.inspect[0, 500]}" unless resp.success?
+
+  resp.body
+end
+
+def render_body(renderer, gh_comment)
+  ts = gh_comment.created_at.strftime("%Y-%m-%d %H:%M UTC")
+  header = "<p><a href=\"#{gh_comment.html_url}\" target=\"_blank\" rel=\"noopener\">" \
+           "<em>#{gh_comment.user.login} wrote on GitHub on #{ts}</em>" \
+           "</a></p>"
+  rendered = renderer.render(gh_comment.body.to_s).strip
+  header + rendered
+end
+
+# --- main ------------------------------------------------------------------
+
+projects = list_projects(plane, PLANE_SLUG)
+projects_by_id = projects.each_with_object({}) { |p, h| h[p["identifier"]] = p } # rubocop:disable Rails/IndexBy
+log.info "discovered Plane projects: #{projects_by_id.keys.inspect}"
+
+posted_total = 0
+patched_total = 0
+unchanged_total = 0
+skipped_total = 0
+limit_hit = false
+
+PROJECT_REPOS.each do |proj_identifier, repo|
+  next if options[:project] && options[:project] != proj_identifier
+  break if limit_hit
+
+  project = projects_by_id[proj_identifier]
+  unless project
+    log.warn "project #{proj_identifier} not found in workspace #{PLANE_SLUG}; skipping"
+    next
+  end
+
+  log.info "=== project #{proj_identifier} (#{project['id']}) -> #{repo} ==="
+  work_items = list_github_work_items(plane, PLANE_SLUG, project["id"])
+  log.info "  #{work_items.size} GH-linked work item(s)"
+
+  work_items.each do |wi|
+    break if limit_hit
+
+    gh_num = wi["external_id"].to_i
+    next if options[:issue] && options[:issue] != gh_num
+
+    if gh_num <= 0
+      log.warn "  work item #{wi['id']} has unparseable external_id #{wi['external_id'].inspect}; skipping"
+      next
+    end
+
+    label = "#{proj_identifier}-#{wi['sequence_id']} (gh##{gh_num})"
+
+    issue = begin
+      gh.issue(repo, gh_num)
+    rescue Octokit::NotFound
+      log.warn "  #{label}: GH issue not found in #{repo}; skipping"
+      next
+    end
+
+    if issue.state != "open"
+      log.info "  #{label}: GH state=#{issue.state}, skipping (open-only)"
+      next
+    end
+
+    existing = list_comments(plane, PLANE_SLUG, project["id"], wi["id"])
+    by_gh_id = existing.select { |c| c["external_source"] == "GITHUB" } # rubocop:disable Rails/IndexBy
+                       .each_with_object({}) { |c, h| h[c["external_id"].to_s] = c }
+    log.info "  #{label}: #{existing.size} existing Plane comments " \
+             "(#{by_gh_id.size} already mirrored from GH)"
+
+    gh_comments = gh.issue_comments(repo, gh_num)
+    posted_here = 0
+    patched_here = 0
+    unchanged_here = 0
+    skipped_here = 0
+    gh_comments.each do |c|
+      break if limit_hit
+
+      cid = c.id.to_s
+
+      if c.user&.type == "Bot"
+        log.debug "    skip gh_comment #{cid}: bot author (#{c.user.login})"
+        skipped_here += 1
+        next
+      end
+
+      rendered = render_body(renderer, c)
+      existing_plane = by_gh_id[cid]
+
+      if existing_plane.nil?
+        # New: POST
+        payload = {
+          comment_html: rendered,
+          external_source: "GITHUB",
+          external_id: cid,
+          access: "INTERNAL",
+          created_at: c.created_at.iso8601
+        }
+        if options[:apply]
+          post_comment(plane, PLANE_SLUG, project["id"], wi["id"], payload)
+          log.info "    POSTed gh_comment #{cid} by @#{c.user.login}"
+        else
+          log.info "    DRY-RUN would POST gh_comment #{cid} by @#{c.user.login} " \
+                   "(#{c.body.to_s.length} chars md -> #{rendered.length} chars html)"
+        end
+        posted_here += 1
+        posted_total += 1
+        limit_hit = options[:limit] && (posted_total + patched_total) >= options[:limit]
+      elsif existing_plane["comment_html"] == rendered
+        # Up-to-date: skip
+        log.debug "    unchanged gh_comment #{cid}"
+        unchanged_here += 1
+      else
+        # Changed: PATCH
+        payload = { comment_html: rendered, created_at: c.created_at.iso8601 }
+        if options[:apply]
+          patch_comment(plane, PLANE_SLUG, project["id"], wi["id"], existing_plane["id"], payload)
+          log.info "    PATCHed gh_comment #{cid} by @#{c.user.login} " \
+                   "(plane comment #{existing_plane['id'][0, 8]})"
+        else
+          log.info "    DRY-RUN would PATCH gh_comment #{cid} by @#{c.user.login} " \
+                   "(plane comment #{existing_plane['id'][0, 8]}, " \
+                   "#{existing_plane['comment_html'].length} -> #{rendered.length} chars html)"
+        end
+        patched_here += 1
+        patched_total += 1
+        limit_hit = options[:limit] && (posted_total + patched_total) >= options[:limit]
+      end
+    end
+
+    unchanged_total += unchanged_here
+    skipped_total += skipped_here
+    log.info "  #{label}: posted=#{posted_here} patched=#{patched_here} " \
+             "unchanged=#{unchanged_here} skipped=#{skipped_here}"
+  end
+end
+
+log.info "DONE: posted=#{posted_total} patched=#{patched_total} " \
+         "unchanged=#{unchanged_total} skipped=#{skipped_total} " \
+         "(mode=#{options[:apply] ? 'APPLY' : 'DRY-RUN'}, limit=#{options[:limit].inspect})"
+
+# rubocop:enable Metrics/BlockLength
