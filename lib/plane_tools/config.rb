@@ -4,10 +4,27 @@ module PlaneTools
   # Loads .env + the YAML project map.
   #
   # The YAML map is keyed by Plane project identifier (the short
-  # prefix shown in work item IDs, e.g. "D4D" for "D4D-42"); each
-  # value is the GitHub repo (`owner/name`) the project's work items
-  # mirror.
+  # prefix shown in work item IDs, e.g. "D4D" for "D4D-42"). Two
+  # value shapes are supported, for backwards compatibility with
+  # the original comments-only config:
+  #
+  #   D4D: forwarddemocracy/data4democracy        # legacy: just a repo
+  #
+  #   D4D:                                         # new: full config
+  #     repo: forwarddemocracy/data4democracy
+  #     priorities:
+  #       "P0 - Urgent": urgent
+  #       "P1 - high priority": high
+  #       "P2 - medium priority": medium
+  #       "P3 - low priority": low
+  #
+  # Bare-string entries get normalised to { repo: "..." } at load
+  # time; consumers always see the hash shape.
   class Config
+    # Order matters: earlier entries are MORE urgent. Used to pick a
+    # winner when an issue has multiple priority labels.
+    PRIORITY_RANK = %w[urgent high medium low none].freeze
+
     attr_reader :plane_token, :plane_slug, :plane_base,
                 :github_token, :project_map, :root
 
@@ -31,6 +48,13 @@ module PlaneTools
 
     def each_project(&)
       @project_map.each(&)
+    end
+
+    # Returns true iff any project in the map has a non-empty
+    # priorities: section. Used by the CLI to decide whether to run
+    # the priority syncer at all.
+    def priorities_configured?
+      @project_map.any? { |_, entry| entry[:priorities] && !entry[:priorities].empty? }
     end
 
     private
@@ -63,10 +87,36 @@ module PlaneTools
       raise "config/plane_github_map.yml must be a Hash, got #{raw.class}" unless raw.is_a?(Hash)
 
       @project_map = raw.each_with_object({}) do |(ident, value), h|
-        raise "project #{ident}: value must be a repo string, got #{value.class}" unless value.is_a?(String)
-
-        h[ident] = { repo: value }
+        h[ident] = normalise_entry(ident, value)
       end
+    end
+
+    def normalise_entry(ident, value)
+      case value
+      when String
+        { repo: value, priorities: nil }
+      when Hash
+        repo = value["repo"] || value[:repo]
+        raise "project #{ident}: missing 'repo' key in #{value.inspect}" unless repo
+
+        prios = value["priorities"] || value[:priorities]
+        { repo: repo, priorities: validate_priorities(ident, prios) }
+      else
+        raise "project #{ident}: unsupported value type #{value.class} (#{value.inspect})"
+      end
+    end
+
+    def validate_priorities(ident, prios)
+      return nil if prios.nil?
+      raise "project #{ident}: priorities: must be a Hash, got #{prios.class}" unless prios.is_a?(Hash)
+
+      prios.each do |label, plane_prio|
+        unless PRIORITY_RANK.include?(plane_prio.to_s)
+          raise "project #{ident}: priority #{label.inspect} maps to invalid Plane priority " \
+                "#{plane_prio.inspect} (allowed: #{PRIORITY_RANK.join(', ')})"
+        end
+      end
+      prios.transform_values(&:to_s)
     end
   end
 end

@@ -128,6 +128,16 @@ module PlaneTools
       resp.body
     end
 
+    def patch_work_item(project_id, work_item_id, payload)
+      resp = @conn.patch(
+        "/api/v1/workspaces/#{slug}/projects/#{project_id}/work-items/#{work_item_id}/",
+        payload
+      )
+      raise "PATCH work-item -> #{resp.status}: #{resp.body.inspect[0, 500]}" unless resp.success?
+
+      resp.body
+    end
+
     def attachments(project_id, work_item_id)
       paged("/api/v1/workspaces/#{slug}/projects/#{project_id}/work-items/#{work_item_id}/attachments/")
     end

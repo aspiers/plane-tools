@@ -1,9 +1,39 @@
 # Maps a Plane project identifier to the GitHub repo whose issues
-# its work items mirror. Used by bin/sync-gh-to-plane to resolve
-# the work item's `external_id` (a bare GH issue number) to a full
-# owner/repo pair.
+# its work items mirror, plus (optionally) the GitHub-label-to-Plane-
+# priority map used by bin/sync-gh-to-plane.
 #
 # Copy this file to config/plane_github_map.yml and edit. Add one
-# entry per Plane project you want to mirror.
+# entry per Plane project you want to sync.
+#
+# Two value shapes are supported:
+#
+#   PROJ: owner/repo                  # legacy short form: only `repo`
+#
+#   PROJ:                             # full form
+#     repo: owner/repo
+#     priorities:                     # optional; omit to skip priority sync
+#       "P0 - critical": urgent
+#       "P1 - high": high
+#       "P2 - medium": medium
+#       "P3 - low": low
+#
+# Valid Plane priorities: urgent, high, medium, low, none.
+#
+# Priority sync rules (see README.md for the full picture):
+#  - When multiple priority labels are set on a GH issue, the most
+#    urgent one wins (urgent > high > medium > low).
+#  - If the GH issue has no priority label, the Plane priority is
+#    left untouched.
+#  - If Plane already has a non-"none" priority that disagrees with
+#    the GH-derived value, the script logs a mismatch and leaves
+#    Plane untouched. Pass --overwrite-priorities to force GH to win.
+
 PROJ: owner/repo
-ANOTHER: owner/another-repo
+
+ANOTHER:
+  repo: owner/another-repo
+  priorities:
+    "P0 - critical": urgent
+    "P1 - high": high
+    "P2 - medium": medium
+    "P3 - low": low

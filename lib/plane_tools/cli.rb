@@ -32,18 +32,29 @@ module PlaneTools
       my_user_id = me["id"]
       log.info "authenticated as Plane user #{my_user_id} (#{me['email']})"
 
+      do_priorities = config.priorities_configured?
+      log.info(
+        do_priorities ? "priority sync: ENABLED (priorities: map present)" : "priority sync: skipped (no priorities: map in config)"
+      )
+
       comments = CommentsSyncer.new(
         plane: plane, github: github, my_user_id: my_user_id,
         log: log, apply: @options[:apply], limit: @options[:limit]
       )
+      priorities = PrioritiesSyncer.new(
+        plane: plane, github: github,
+        log: log, apply: @options[:apply],
+        overwrite: @options[:overwrite_priorities]
+      )
 
-      sync_all_projects(config, projects_by_id, plane, github, comments, log)
-      summarise(log, comments)
+      sync_all_projects(config, projects_by_id, plane, github, comments, priorities, do_priorities, log)
+      summarise(log, comments, priorities, do_priorities)
     end
 
     private
 
-    def sync_all_projects(config, projects_by_id, plane, github, comments, log)
+    # rubocop:disable Metrics/ParameterLists,Metrics/MethodLength
+    def sync_all_projects(config, projects_by_id, plane, github, comments, priorities, do_priorities, log)
       config.each_project do |proj_identifier, entry|
         next if @options[:project] && @options[:project] != proj_identifier
         break if comments.limit_hit?
@@ -55,16 +66,20 @@ module PlaneTools
         end
 
         repo = entry[:repo]
+        priority_map = entry[:priorities]
         log.info "=== project #{proj_identifier} (#{project['id']}) -> #{repo} ==="
 
         work_items = plane.github_work_items(project["id"])
         log.info "  #{work_items.size} GH-linked work item(s)"
 
-        sync_project_work_items(project, repo, work_items, github, comments, log)
+        sync_project_work_items(
+          project, repo, work_items, priority_map,
+          github, comments, priorities, do_priorities, log
+        )
       end
     end
 
-    def sync_project_work_items(project, repo, work_items, github, comments, log)
+    def sync_project_work_items(project, repo, work_items, priority_map, github, comments, priorities, do_priorities, log)
       work_items.each do |wi|
         break if comments.limit_hit?
 
@@ -82,14 +97,23 @@ module PlaneTools
 
         if issue.state != "open"
           log.info "  #{label}: GH state=#{issue.state}, skipping (open-only)"
+          priorities.note_closed(label) if do_priorities
           next
         end
 
         comments.sync_work_item(
           project: project, repo: repo, work_item: wi, label: label, issue: issue
         )
+
+        next unless do_priorities
+
+        priorities.sync_work_item(
+          project: project, work_item: wi, label: label,
+          issue: issue, priority_map: priority_map
+        )
       end
     end
+    # rubocop:enable Metrics/ParameterLists,Metrics/MethodLength
 
     def fetch_issue(github, repo, gh_num, label, log)
       github.issue(repo, gh_num)
@@ -99,7 +123,7 @@ module PlaneTools
     end
 
     def parse_options(argv)
-      opts = { project: nil, issue: nil, limit: nil, apply: false, yes: false }
+      opts = { project: nil, issue: nil, limit: nil, apply: false, yes: false, overwrite_priorities: false }
       OptionParser.new do |op|
         op.banner = "Usage: bin/sync-gh-to-plane [options]"
         op.on("--project ID", "Restrict to one Plane project identifier (e.g. D4D)") { |v| opts[:project] = v }
@@ -110,6 +134,10 @@ module PlaneTools
         op.on("--apply", "Actually POST/PATCH. Without this, runs as dry-run.") { opts[:apply] = true }
         op.on("--yes", "Skip the interactive sync-mode confirmation prompt (for unattended runs)") do
           opts[:yes] = true
+        end
+        op.on("--overwrite-priorities",
+              "Overwrite Plane priorities that disagree with GH (default: keep Plane, log mismatch)") do
+          opts[:overwrite_priorities] = true
         end
         op.on("-h", "--help") do
           puts op
@@ -150,10 +178,17 @@ module PlaneTools
       log.info "sync-mode confirmation accepted"
     end
 
-    def summarise(log, comments)
+    def summarise(log, comments, priorities, do_priorities)
       c = comments.stats
       log.info "comments: posted=#{c.posted} patched=#{c.patched} " \
                "unchanged=#{c.unchanged} foreign=#{c.foreign} skipped=#{c.skipped}"
+      if do_priorities
+        p = priorities.stats
+        log.info "priorities: updated=#{p.updated} unchanged=#{p.unchanged} " \
+                 "no_label=#{p.skipped_no_label} no_config=#{p.skipped_no_config} " \
+                 "mismatch_kept=#{p.mismatch_kept} mismatch_overwritten=#{p.mismatch_overwritten} " \
+                 "closed=#{p.skipped_closed}"
+      end
       log.info "DONE (mode=#{@options[:apply] ? 'APPLY' : 'DRY-RUN'}, limit=#{@options[:limit].inspect})"
     end
   end

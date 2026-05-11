@@ -6,11 +6,18 @@ Tooling around [Plane.so](https://plane.so), in Ruby.
 
 ### `bin/sync-gh-to-plane`
 
-Mirrors GitHub issue comments into the corresponding Plane work
-items. Iterates Plane work items that are linked to GitHub issues
-(via Plane's `external_source=GITHUB` + `external_id=<gh issue
-number>` mechanism), fetches each linked GH issue's comments, and
-upserts them into Plane.
+Mirrors state from GitHub issues into the corresponding Plane work
+items. Iterates Plane work items linked to GH issues (via Plane's
+`external_source=GITHUB` + `external_id=<gh issue number>`
+mechanism), and for each one syncs:
+
+1. **Comments** — every GitHub comment is upserted into Plane as a
+   Plane comment with matching `external_id`.
+2. **Priority** *(optional)* — the GitHub issue's priority label is
+   translated to a Plane work-item priority (urgent / high / medium
+   / low / none) per the project's `priorities:` map in
+   `config/plane_github_map.yml`. Omit the map and priority sync is
+   skipped automatically.
 
 Behaviour highlights:
 
@@ -18,10 +25,11 @@ Behaviour highlights:
   Plane (matched by their GH comment id stored as `external_id`)
   are skipped if their rendered HTML is unchanged, and PATCHed in
   place if the rendering differs (e.g. the script's header format
-  changed, or the GH user edited their comment).
-- **Backdated.** Plane's `created_at` is set to the original GH
-  comment timestamp so chronology is preserved natively in Plane's
-  UI, not just in the visible header.
+  changed, or the GH user edited their comment). Priorities are
+  only written when they actually need to change.
+- **Backdated.** Plane's `created_at` on each mirrored comment is
+  set to the original GH comment timestamp so chronology is
+  preserved natively in Plane's UI.
 - **Bot-aware.** Comments authored by GitHub Apps (`user.type ==
   "Bot"`) are filtered out. This is important: the official Plane
   GitHub integration posts "Synced with Plane Workspace 🔄"
@@ -29,6 +37,13 @@ Behaviour highlights:
   this filter the script would mirror them back into Plane,
   creating noise.
 - **Open issues only.** Closed/locked GH issues are skipped.
+- **Highest priority wins.** If a GH issue has multiple priority
+  labels (e.g. P0 and P1), the most urgent one (urgent > high >
+  medium > low) is applied.
+- **Mismatch-safe by default.** If Plane already has a non-"none"
+  priority that disagrees with the GH-derived one, the script logs
+  the mismatch and leaves Plane alone. Pass
+  `--overwrite-priorities` to force GH to win.
 - **Dry-run by default.** `--apply` is required to write.
 
 #### Why the unidirectional-sync requirement
@@ -80,6 +95,27 @@ from the [GitHub CLI](https://cli.github.com).
 The `config/plane_github_map.yml` file maps each Plane project's
 identifier (the short prefix shown in work item IDs, e.g. `D4D`
 for `D4D-42`) to its corresponding GitHub repo as `owner/name`.
+Two shapes are supported:
+
+```yaml
+# Legacy short form: just the repo (no priority sync)
+PROJ: owner/repo
+
+# Full form (priorities are optional)
+ANOTHER:
+  repo: owner/another-repo
+  priorities:
+    "P0 - critical": urgent
+    "P1 - high": high
+    "P2 - medium": medium
+    "P3 - low": low
+```
+
+The keys under `priorities:` are GitHub label names; the values
+are Plane priorities (one of `urgent`, `high`, `medium`, `low`,
+`none`). Omit the `priorities:` section entirely to skip
+priority sync for that project. If no project in the file has a
+`priorities:` section, the priority syncer is skipped completely.
 
 #### Usage
 
@@ -97,6 +133,9 @@ bundle exec bin/sync-gh-to-plane --apply --limit 5
 
 # Skip the confirmation prompt (for unattended runs)
 bundle exec bin/sync-gh-to-plane --apply --yes
+
+# Force GH priority to win when Plane already has a different value
+bundle exec bin/sync-gh-to-plane --apply --overwrite-priorities
 ```
 
 Output is mirrored to stdout and `tmp/sync-gh-to-plane.log`.
@@ -115,6 +154,7 @@ The CLI is a thin wrapper around `lib/plane_tools/`:
 - `attachments.rb`, `image_rewriter.rb` — mirror GH-hosted
   images to Plane attachments
 - `comments_syncer.rb` — comment-upsert loop
+- `priorities_syncer.rb` — label → priority loop
 - `cli.rb` — `OptionParser` + orchestration
 
 ## License
