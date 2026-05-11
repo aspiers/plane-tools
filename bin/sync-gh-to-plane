@@ -1,0 +1,29 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Mirror GitHub state into the corresponding Plane work items.
+#
+# Iterates Plane work items that are linked to GitHub issues
+# (external_source=GITHUB) and, for each, syncs:
+#
+#  1. issue comments  -> Plane comments (always)
+#  2. priority labels -> Plane work-item priority (only if the
+#     project entry in config/plane_github_map.yml carries a
+#     `priorities:` sub-map)
+#
+# Usage:
+#   bundle exec bin/sync-gh-to-plane [--project ID]
+#                                    [--issue NUM]
+#                                    [--limit N]
+#                                    [--apply]
+#                                    [--yes]
+#                                    [--overwrite-priorities]
+#
+# Defaults to dry-run. Pass --apply to actually POST/PATCH.
+#
+# Required env (from .env):
+#   PLANE_API_TOKEN, PLANE_WORKSPACE_SLUG, PLANE_BASE_URL, GITHUB_TOKEN
+
+require_relative "../lib/plane_tools"
+
+PlaneTools::CLI.run(ARGV, root: File.expand_path("..", __dir__))

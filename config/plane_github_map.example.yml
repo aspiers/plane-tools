@@ -1,7 +1,7 @@
 # Maps a Plane project identifier to the GitHub repo whose issues
-# its work items mirror. Used by bin/import-gh-comments-to-plane to
-# resolve the work item's `external_id` (a bare GH issue number) to
-# a full owner/repo pair.
+# its work items mirror. Used by bin/sync-gh-to-plane to resolve
+# the work item's `external_id` (a bare GH issue number) to a full
+# owner/repo pair.
 #
 # Copy this file to config/plane_github_map.yml and edit. Add one
 # entry per Plane project you want to mirror.

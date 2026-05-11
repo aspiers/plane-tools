@@ -4,7 +4,7 @@ Tooling around [Plane.so](https://plane.so), in Ruby.
 
 ## What's here
 
-### `bin/import-gh-comments-to-plane`
+### `bin/sync-gh-to-plane`
 
 Mirrors GitHub issue comments into the corresponding Plane work
 items. Iterates Plane work items that are linked to GitHub issues
@@ -85,21 +85,37 @@ for `D4D-42`) to its corresponding GitHub repo as `owner/name`.
 
 ```bash
 # Dry-run everything (no writes; prints planned operations)
-bundle exec bin/import-gh-comments-to-plane
+bundle exec bin/sync-gh-to-plane
 
 # Apply for real (after disabling bidirectional sync in Plane)
-bundle exec bin/import-gh-comments-to-plane --apply
+bundle exec bin/sync-gh-to-plane --apply
 
 # Restrict scope
-bundle exec bin/import-gh-comments-to-plane --project D4D
-bundle exec bin/import-gh-comments-to-plane --project D4D --issue 161
-bundle exec bin/import-gh-comments-to-plane --apply --limit 5
+bundle exec bin/sync-gh-to-plane --project D4D
+bundle exec bin/sync-gh-to-plane --project D4D --issue 161
+bundle exec bin/sync-gh-to-plane --apply --limit 5
 
 # Skip the confirmation prompt (for unattended runs)
-bundle exec bin/import-gh-comments-to-plane --apply --yes
+bundle exec bin/sync-gh-to-plane --apply --yes
 ```
 
-Output is mirrored to stdout and `tmp/import-gh-comments.log`.
+Output is mirrored to stdout and `tmp/sync-gh-to-plane.log`.
+
+#### Library layout
+
+The CLI is a thin wrapper around `lib/plane_tools/`:
+
+- `config.rb` — `.env` + YAML loading
+- `logging.rb` — tee-to-file logger
+- `plane_client.rb` — Faraday wrapper, rate-limit pacer,
+  endpoint helpers
+- `github_client.rb` — Octokit + image-download Faraday clients
+- `gh_renderer.rb` — Commonmarker → Plane-safe HTML +
+  table-column-width injection
+- `attachments.rb`, `image_rewriter.rb` — mirror GH-hosted
+  images to Plane attachments
+- `comments_syncer.rb` — comment-upsert loop
+- `cli.rb` — `OptionParser` + orchestration
 
 ## License
 
