@@ -570,9 +570,20 @@ projects = list_projects(plane, PLANE_SLUG)
 projects_by_id = projects.each_with_object({}) { |p, h| h[p["identifier"]] = p } # rubocop:disable Rails/IndexBy
 log.info "discovered Plane projects: #{projects_by_id.keys.inspect}"
 
+# Identify our token's user. Comments created by other Plane users
+# (notably the official GH integration's user) cannot be PATCHed by
+# us — Plane returns 403 "Only the comment creator can update". We
+# detect such "foreign" comments and skip them rather than crash.
+me_resp = plane.get("/api/v1/users/me/")
+raise "GET /users/me/ -> #{me_resp.status}" unless me_resp.status == 200
+
+MY_USER_ID = me_resp.body["id"]
+log.info "authenticated as Plane user #{MY_USER_ID} (#{me_resp.body['email']})"
+
 posted_total = 0
 patched_total = 0
 unchanged_total = 0
+foreign_total = 0
 skipped_total = 0
 limit_hit = false
 
@@ -629,6 +640,7 @@ PROJECT_REPOS.each do |proj_identifier, repo|
     posted_here = 0
     patched_here = 0
     unchanged_here = 0
+    foreign_here = 0
     skipped_here = 0
     gh_comments.each do |c|
       break if limit_hit
@@ -643,6 +655,15 @@ PROJECT_REPOS.each do |proj_identifier, repo|
 
       rendered = render_body(c, image_rewriter: image_rewriter)
       existing_plane = by_gh_id[cid]
+
+      if existing_plane && existing_plane["created_by"] != MY_USER_ID
+        # Comment created by another Plane user (e.g. Plane's GH
+        # integration); we can't PATCH it (Plane returns 403). Skip
+        # and leave whatever they have in place.
+        log.warn "    foreign gh_comment #{cid}: created by #{existing_plane['created_by']&.[](0, 8)}, skipping"
+        foreign_here += 1
+        next
+      end
 
       if existing_plane.nil?
         # New: POST
@@ -686,14 +707,15 @@ PROJECT_REPOS.each do |proj_identifier, repo|
     end
 
     unchanged_total += unchanged_here
+    foreign_total += foreign_here
     skipped_total += skipped_here
     log.info "  #{label}: posted=#{posted_here} patched=#{patched_here} " \
-             "unchanged=#{unchanged_here} skipped=#{skipped_here}"
+             "unchanged=#{unchanged_here} foreign=#{foreign_here} skipped=#{skipped_here}"
   end
 end
 
 log.info "DONE: posted=#{posted_total} patched=#{patched_total} " \
-         "unchanged=#{unchanged_total} skipped=#{skipped_total} " \
+         "unchanged=#{unchanged_total} foreign=#{foreign_total} skipped=#{skipped_total} " \
          "(mode=#{options[:apply] ? 'APPLY' : 'DRY-RUN'}, limit=#{options[:limit].inspect})"
 
 # rubocop:enable Metrics/BlockLength
