@@ -29,31 +29,19 @@ module PlaneTools
     INLINE_CODE_RE = /(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)/m.freeze
 
     # Markdown link `[text](url)`. We skip the whole construct
-    # (text + url) — the link already targets something explicit and
-    # rewriting visible-text inside it produces nested-bracket garbage.
-    # In phase-2 mode we additionally inspect the URL: if it points at
-    # a GH issue/PR we know about, we APPEND a Plane sibling link
-    # after the original construct.
-    MD_LINK_RE = /\[(?:[^\[\]]|\\\[|\\\])*\]\((?<url>(?:[^()]|\([^()]*\))*)\)/m.freeze
+    # verbatim: a link the human (or upstream tooling) explicitly
+    # wrote is their choice — appending or rewriting anything after
+    # it would be presumptuous, easy to get wrong (comment-anchored
+    # URLs, self-referential links to the work item being rendered,
+    # sub-path URLs like /pull/N/files etc.), and was the source of
+    # a real bug where each comment's body-header self-quote ended
+    # up duplicated with a spurious Plane-id appended.
+    MD_LINK_RE = /\[(?:[^\[\]]|\\\[|\\\])*\]\((?:[^()]|\([^()]*\))*\)/m.freeze
 
     # owner/repo: alphanumeric + `.` `_` `-` segments, one slash.
     REPO_SEGMENT = /[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/.freeze
     REPO_NAME    = /[A-Za-z0-9][A-Za-z0-9._-]*/.freeze
     CROSS_REPO_RE = %r{(?<![A-Za-z0-9._/-])(#{REPO_SEGMENT}/#{REPO_NAME})\#(\d+)\b}.freeze
-
-    # github.com/<owner>/<repo>/{issues,pull}/<N> (optionally followed by
-    # # / ? / a trailing slash — anything that doesn't change which
-    # issue is being referenced). Tightened to require exactly one
-    # slash between owner and repo so we don't accidentally match
-    # other GH paths.
-    GH_ISSUE_URL_RE = %r{
-      \Ahttps?://github\.com/
-      (?<repo>#{REPO_SEGMENT}/#{REPO_NAME})/
-      (?:issues|pull)/
-      (?<num>\d+)
-      (?:[/?\#][^\s]*)?
-      \z
-    }x.freeze
 
     # Bare `#N`: must not be preceded by an alphanumeric, slash, or
     # another hash, and must not be the start of a `#L42`-style
@@ -114,81 +102,38 @@ module PlaneTools
     end
 
     # Rewrite a chunk of prose markdown (already known to be
-    # outside any fenced code block). Walks the chunk, routing each
-    # segment through one of three handlers:
-    #  - inline code span: preserved verbatim
-    #  - existing markdown link: preserved verbatim unless its URL is
-    #    a GH issue/PR we recognise, in which case a Plane sibling
-    #    link is appended after the construct
-    #  - prose: bare and cross-repo `#N` refs are hyperlinked
-    #
-    # We cannot use `Regexp.union(INLINE_CODE_RE, MD_LINK_RE)` here
-    # because INLINE_CODE_RE has a numbered backreference (`\1`) and
-    # MD_LINK_RE has a named capture group, which Ruby's Regexp.union
-    # rejects. Instead we match each regex independently from `pos`
-    # and dispatch on whichever matches earliest.
+    # outside any fenced code block). Inline code spans and
+    # existing markdown-link constructs (`[text](url)`) are
+    # preserved verbatim. Bare and cross-repo `#N` refs in the
+    # remaining prose are hyperlinked.
     def rewrite_prose_chunk(text, ctx)
+      protect(text, [INLINE_CODE_RE, MD_LINK_RE]) do |prose|
+        prose
+          .gsub(CROSS_REPO_RE) do
+            cross_repo = ::Regexp.last_match(1)
+            num = ::Regexp.last_match(2)
+            build_links("#{cross_repo}##{num}", cross_repo, num, ctx)
+          end
+          .gsub(BARE_REF_RE) do
+            num = ::Regexp.last_match(1)
+            build_links("##{num}", ctx[:repo], num, ctx)
+          end
+      end
+    end
+
+    # Apply `block` only to the bits of `text` outside any of the
+    # `regexes`. Matched regions are appended verbatim.
+    def protect(text, regexes)
+      combined = Regexp.union(regexes)
       out = +""
       pos = 0
-      while (m = next_protected_match(text, pos))
-        out << rewrite_prose_only(text[pos...m.begin(0)], ctx)
-        decorated, advance = decorate_protected(m, text, ctx)
-        out << decorated
-        pos = m.end(0) + advance
+      while (m = combined.match(text, pos))
+        out << yield(text[pos...m.begin(0)])
+        out << m[0]
+        pos = m.end(0)
       end
-      out << rewrite_prose_only(text[pos..], ctx)
+      out << yield(text[pos..])
       out
-    end
-
-    def next_protected_match(text, pos)
-      code = INLINE_CODE_RE.match(text, pos)
-      link = MD_LINK_RE.match(text, pos)
-      return nil unless code || link
-      return code unless link
-      return link unless code
-
-      code.begin(0) <= link.begin(0) ? code : link
-    end
-
-    def rewrite_prose_only(text, ctx)
-      text
-        .gsub(CROSS_REPO_RE) do
-          cross_repo = ::Regexp.last_match(1)
-          num = ::Regexp.last_match(2)
-          build_links("#{cross_repo}##{num}", cross_repo, num, ctx)
-        end
-        .gsub(BARE_REF_RE) do
-          num = ::Regexp.last_match(1)
-          build_links("##{num}", ctx[:repo], num, ctx)
-        end
-    end
-
-    # Decorate a protected match. Returns [output, advance] where
-    # `advance` is the number of extra bytes from the input that
-    # have been consumed (used to swallow an already-present
-    # sibling-link suffix for idempotency).
-    #
-    # Inline code spans pass through verbatim (no :url group).
-    # Markdown links pass through, but when the URL targets a GH
-    # issue/PR we know about we append a Plane sibling link after
-    # the construct. If the input already has that same suffix, we
-    # consume it instead of duplicating it.
-    def decorate_protected(match, text, ctx)
-      whole = match[0]
-      url = match.named_captures["url"]
-      return [whole, 0] unless url
-
-      gh_match = url.strip.match(GH_ISSUE_URL_RE)
-      return [whole, 0] unless gh_match
-
-      sibling = lookup_sibling(gh_match[:repo], gh_match[:num], ctx)
-      return [whole, 0] unless sibling
-
-      suffix = " (#{plane_link(sibling, ctx[:plane_web_base])})"
-      after = text[match.end(0), suffix.length]
-      return [whole + suffix, suffix.length] if after == suffix
-
-      [whole + suffix, 0]
     end
 
     def build_links(visible, repo, number, ctx)

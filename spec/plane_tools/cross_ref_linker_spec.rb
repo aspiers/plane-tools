@@ -201,43 +201,21 @@ RSpec.describe PlaneTools::CrossRefLinker do
       expect(rewrite_p2(once)).to eq(once)
     end
 
-    describe "appending sibling link to existing GH-issue links" do
-      it "appends a Plane sibling after [text](github-issue-url)" do
+    describe "respect for existing markdown links" do
+      it "leaves a [text](github-issue-url) construct alone in phase-2 mode" do
         input = "see [#159 details](https://github.com/forwarddemocracy/data4democracy/issues/159)"
-        expect(rewrite_p2(input)).to eq(
-          "see [#159 details](https://github.com/forwarddemocracy/data4democracy/issues/159)" \
-          " ([D4D-75](https://app.plane.so/fwddem/browse/D4D-75))"
-        )
-      end
-
-      it "appends for /pull/N URLs too" do
-        input = "[PR 159](https://github.com/forwarddemocracy/data4democracy/pull/159)"
-        expect(rewrite_p2(input)).to eq(
-          "[PR 159](https://github.com/forwarddemocracy/data4democracy/pull/159)" \
-          " ([D4D-75](https://app.plane.so/fwddem/browse/D4D-75))"
-        )
-      end
-
-      it "leaves [text](github-issue-url) alone when no Plane sibling" do
-        input = "[no sibling](https://github.com/some/repo/issues/9999)"
         expect(rewrite_p2(input)).to eq(input)
       end
 
-      it "leaves non-GH-issue [text](url) untouched" do
-        input = "[blog](https://example.com)"
+      it "leaves a [text](github-comment-anchor) construct alone" do
+        input = "see [author wrote on GitHub]" \
+                "(https://github.com/forwarddemocracy/data4democracy/issues/159#issuecomment-4408408032)"
         expect(rewrite_p2(input)).to eq(input)
       end
 
-      it "does not double-append if the sibling suffix is already present" do
-        input = "see [#159](https://github.com/forwarddemocracy/data4democracy/issues/159)" \
-                " ([D4D-75](https://app.plane.so/fwddem/browse/D4D-75)) ok"
+      it "leaves a [text](github-pull-subpath) construct alone" do
+        input = "[diff](https://github.com/forwarddemocracy/data4democracy/pull/159/files)"
         expect(rewrite_p2(input)).to eq(input)
-      end
-
-      it "matches GH-issue URLs with trailing slashes / fragments / queries" do
-        input = "[ref](https://github.com/forwarddemocracy/data4democracy/issues/159#issuecomment-123)"
-        out = rewrite_p2(input)
-        expect(out).to include("([D4D-75](https://app.plane.so/fwddem/browse/D4D-75))")
       end
     end
   end
