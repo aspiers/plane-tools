@@ -9,13 +9,16 @@ module PlaneTools
 
     attr_reader :stats
 
-    def initialize(plane:, github:, my_user_id:, log:, apply:, limit: nil)
+    def initialize(plane:, github:, my_user_id:, log:, apply:, limit: nil,
+                   gh_to_plane_index: nil, plane_web_base: nil)
       @plane = plane
       @github = github
       @my_user_id = my_user_id
       @log = log
       @apply = apply
       @limit = limit
+      @gh_to_plane_index = gh_to_plane_index
+      @plane_web_base = plane_web_base
       @stats = Stats.new(posted: 0, patched: 0, unchanged: 0, foreign: 0, skipped: 0)
       @limit_hit = false
     end
@@ -59,7 +62,12 @@ module PlaneTools
         return
       end
 
-      rendered = GhRenderer.render(c, image_rewriter: image_rewriter, repo: repo)
+      rendered = GhRenderer.render(
+        c, image_rewriter: image_rewriter, repo: repo,
+        gh_to_plane_index: @gh_to_plane_index,
+        plane_web_base: @plane_web_base,
+        logger: @log
+      )
       existing_plane = by_gh_id[cid]
 
       if existing_plane && existing_plane["created_by"] != @my_user_id

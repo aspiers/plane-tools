@@ -25,7 +25,7 @@ module PlaneTools
     # winner when an issue has multiple priority labels.
     PRIORITY_RANK = %w[urgent high medium low none].freeze
 
-    attr_reader :plane_token, :plane_slug, :plane_base,
+    attr_reader :plane_token, :plane_slug, :plane_base, :plane_web_base,
                 :github_token, :project_map, :root
 
     def self.load(root)
@@ -68,10 +68,11 @@ module PlaneTools
       end
       Dotenv.load(env_path)
 
-      @plane_token  = ENV.fetch("PLANE_API_TOKEN")
-      @plane_slug   = ENV.fetch("PLANE_WORKSPACE_SLUG")
-      @plane_base   = ENV.fetch("PLANE_BASE_URL", "https://api.plane.so")
-      @github_token = ENV.fetch("GITHUB_TOKEN") { `gh auth token`.strip }
+      @plane_token    = ENV.fetch("PLANE_API_TOKEN")
+      @plane_slug     = ENV.fetch("PLANE_WORKSPACE_SLUG")
+      @plane_base     = ENV.fetch("PLANE_BASE_URL", "https://api.plane.so")
+      @plane_web_base = ENV.fetch("PLANE_WEB_URL", "https://app.plane.so")
+      @github_token   = ENV.fetch("GITHUB_TOKEN") { `gh auth token`.strip }
       raise "no GitHub token (set GITHUB_TOKEN or run gh auth login)" if @github_token.empty?
     end
 

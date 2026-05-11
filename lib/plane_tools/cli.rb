@@ -37,9 +37,14 @@ module PlaneTools
         do_priorities ? "priority sync: ENABLED (priorities: map present)" : "priority sync: skipped (no priorities: map in config)"
       )
 
+      gh_to_plane_index, work_items_by_project = build_gh_to_plane_index(
+        config, projects_by_id, plane, log
+      )
+
       comments = CommentsSyncer.new(
         plane: plane, github: github, my_user_id: my_user_id,
-        log: log, apply: @options[:apply], limit: @options[:limit]
+        log: log, apply: @options[:apply], limit: @options[:limit],
+        gh_to_plane_index: gh_to_plane_index, plane_web_base: config.plane_web_base
       )
       priorities = PrioritiesSyncer.new(
         plane: plane, github: github,
@@ -47,14 +52,52 @@ module PlaneTools
         overwrite: @options[:overwrite_priorities]
       )
 
-      sync_all_projects(config, projects_by_id, plane, github, comments, priorities, do_priorities, log)
+      sync_all_projects(
+        config, projects_by_id, work_items_by_project,
+        plane, github, comments, priorities, do_priorities, log
+      )
       summarise(log, comments, priorities, do_priorities)
+    end
+
+    # Build a "<repo>#<external_id>" -> { project_identifier:,
+    # sequence_id:, slug: } index of every GH-linked Plane work
+    # item across every project named in the YAML map. Used to
+    # decorate cross-ref hyperlinks in mirrored comments with a
+    # second link to the Plane sibling.
+    #
+    # Returns [index, work_items_by_project_id] so the main sync
+    # loop can re-use the per-project work-item listings instead
+    # of fetching them a second time.
+    def build_gh_to_plane_index(config, projects_by_id, plane, log)
+      index = {}
+      work_items_by_project = {}
+      config.each_project do |proj_identifier, entry|
+        project = projects_by_id[proj_identifier]
+        next unless project
+
+        wis = plane.github_work_items(project["id"])
+        work_items_by_project[project["id"]] = wis
+        repo = entry[:repo]
+        wis.each do |wi|
+          gh_num = wi["external_id"].to_i
+          next unless gh_num.positive?
+
+          index["#{repo}##{gh_num}"] = {
+            project_identifier: proj_identifier,
+            sequence_id: wi["sequence_id"],
+            slug: config.plane_slug
+          }
+        end
+      end
+      log.info "built GH->Plane index: #{index.size} mirrored work item(s) across " \
+               "#{work_items_by_project.size} project(s)"
+      [index, work_items_by_project]
     end
 
     private
 
     # rubocop:disable Metrics/ParameterLists,Metrics/MethodLength
-    def sync_all_projects(config, projects_by_id, plane, github, comments, priorities, do_priorities, log)
+    def sync_all_projects(config, projects_by_id, work_items_by_project, plane, github, comments, priorities, do_priorities, log)
       config.each_project do |proj_identifier, entry|
         next if @options[:project] && @options[:project] != proj_identifier
         break if comments.limit_hit?
@@ -69,7 +112,7 @@ module PlaneTools
         priority_map = entry[:priorities]
         log.info "=== project #{proj_identifier} (#{project['id']}) -> #{repo} ==="
 
-        work_items = plane.github_work_items(project["id"])
+        work_items = work_items_by_project.fetch(project["id"]) { plane.github_work_items(project["id"]) }
         log.info "  #{work_items.size} GH-linked work item(s)"
 
         sync_project_work_items(

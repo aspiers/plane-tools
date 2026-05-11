@@ -48,11 +48,17 @@ module PlaneTools
     TABLE_CODE_FACTOR     = 1.10 # monospace <code> chars wider than regular
     TABLE_CODE_CHIP_PAD   = 12 # extra px for the <code> rounded chip styling
 
-    def self.render(gh_comment, image_rewriter:, repo:)
-      new.render(gh_comment, image_rewriter: image_rewriter, repo: repo)
+    def self.render(gh_comment, image_rewriter:, repo:,
+                    gh_to_plane_index: nil, plane_web_base: nil, logger: nil)
+      new.render(
+        gh_comment, image_rewriter: image_rewriter, repo: repo,
+        gh_to_plane_index: gh_to_plane_index,
+        plane_web_base: plane_web_base, logger: logger
+      )
     end
 
-    def render(gh_comment, image_rewriter:, repo:)
+    def render(gh_comment, image_rewriter:, repo:,
+               gh_to_plane_index: nil, plane_web_base: nil, logger: nil)
       ts = gh_comment.created_at.strftime("%Y-%m-%d %H:%M UTC")
       # Note: clicking this link in Plane currently opens two browser
       # tabs - reproducible even on links authored inside Plane's own
@@ -61,7 +67,9 @@ module PlaneTools
       header = "<p><a href=\"#{gh_comment.html_url}\">" \
                "<em>#{gh_comment.user.login} wrote on GitHub on #{ts}</em>" \
                "</a></p>"
-      body_md = CrossRefLinker.rewrite(gh_comment.body.to_s, repo: repo)
+      cross_ref_args = { repo: repo, plane_index: gh_to_plane_index, logger: logger }
+      cross_ref_args[:plane_web_base] = plane_web_base if plane_web_base
+      body_md = CrossRefLinker.rewrite(gh_comment.body.to_s, **cross_ref_args)
       rendered = Commonmarker.to_html(
         body_md, options: COMMONMARKER_OPTS, plugins: COMMONMARKER_PLUGINS
       ).strip

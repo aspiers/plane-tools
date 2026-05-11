@@ -138,6 +138,110 @@ RSpec.describe PlaneTools::CrossRefLinker do
     end
   end
 
+  describe "phase-2 dual-link with plane_index" do
+    let(:index) do
+      {
+        "forwarddemocracy/data4democracy#159" => {
+          project_identifier: "D4D", sequence_id: 75, slug: "fwddem"
+        },
+        "forwarddemocracy/tacticalvote#495" => {
+          project_identifier: "TV", sequence_id: 40, slug: "fwddem"
+        }
+      }
+    end
+
+    def rewrite_p2(md, **extra)
+      described_class.rewrite(md, repo: repo, plane_index: index, **extra)
+    end
+
+    it "appends a Plane sibling link when bare ref has a match" do
+      out = rewrite_p2("see #159 for context")
+      expect(out).to eq(
+        "see [#159](https://github.com/forwarddemocracy/data4democracy/issues/159)" \
+        " ([D4D-75](https://app.plane.so/fwddem/browse/D4D-75)) for context"
+      )
+    end
+
+    it "appends a Plane sibling link when cross-repo ref has a match" do
+      out = rewrite_p2("blocked by forwarddemocracy/tacticalvote#495")
+      expect(out).to eq(
+        "blocked by [forwarddemocracy/tacticalvote#495]" \
+        "(https://github.com/forwarddemocracy/tacticalvote/issues/495)" \
+        " ([TV-40](https://app.plane.so/fwddem/browse/TV-40))"
+      )
+    end
+
+    it "falls back to single GH link when bare ref has no Plane sibling" do
+      out = rewrite_p2("ancient #99 left as-is")
+      expect(out).to eq(
+        "ancient [#99](https://github.com/forwarddemocracy/data4democracy/issues/99) left as-is"
+      )
+    end
+
+    it "logs a debug note for unmatched refs when a logger is supplied" do
+      logger = double("logger")
+      expect(logger).to receive(:debug).with(/no Plane sibling for forwarddemocracy\/data4democracy#99/)
+      rewrite_p2("ancient #99", logger: logger)
+    end
+
+    it "does not log unmatched refs when no logger is supplied" do
+      expect { rewrite_p2("ancient #99") }.not_to raise_error
+    end
+
+    it "honours a custom plane_web_base" do
+      out = described_class.rewrite(
+        "see #159", repo: repo, plane_index: index,
+        plane_web_base: "https://plane.example.com"
+      )
+      expect(out).to include("(https://plane.example.com/fwddem/browse/D4D-75)")
+    end
+
+    it "is still idempotent in phase-2 mode" do
+      once = rewrite_p2("see #159 and #99 and foo/bar#7")
+      expect(rewrite_p2(once)).to eq(once)
+    end
+
+    describe "appending sibling link to existing GH-issue links" do
+      it "appends a Plane sibling after [text](github-issue-url)" do
+        input = "see [#159 details](https://github.com/forwarddemocracy/data4democracy/issues/159)"
+        expect(rewrite_p2(input)).to eq(
+          "see [#159 details](https://github.com/forwarddemocracy/data4democracy/issues/159)" \
+          " ([D4D-75](https://app.plane.so/fwddem/browse/D4D-75))"
+        )
+      end
+
+      it "appends for /pull/N URLs too" do
+        input = "[PR 159](https://github.com/forwarddemocracy/data4democracy/pull/159)"
+        expect(rewrite_p2(input)).to eq(
+          "[PR 159](https://github.com/forwarddemocracy/data4democracy/pull/159)" \
+          " ([D4D-75](https://app.plane.so/fwddem/browse/D4D-75))"
+        )
+      end
+
+      it "leaves [text](github-issue-url) alone when no Plane sibling" do
+        input = "[no sibling](https://github.com/some/repo/issues/9999)"
+        expect(rewrite_p2(input)).to eq(input)
+      end
+
+      it "leaves non-GH-issue [text](url) untouched" do
+        input = "[blog](https://example.com)"
+        expect(rewrite_p2(input)).to eq(input)
+      end
+
+      it "does not double-append if the sibling suffix is already present" do
+        input = "see [#159](https://github.com/forwarddemocracy/data4democracy/issues/159)" \
+                " ([D4D-75](https://app.plane.so/fwddem/browse/D4D-75)) ok"
+        expect(rewrite_p2(input)).to eq(input)
+      end
+
+      it "matches GH-issue URLs with trailing slashes / fragments / queries" do
+        input = "[ref](https://github.com/forwarddemocracy/data4democracy/issues/159#issuecomment-123)"
+        out = rewrite_p2(input)
+        expect(out).to include("([D4D-75](https://app.plane.so/fwddem/browse/D4D-75))")
+      end
+    end
+  end
+
   describe "edge cases" do
     it "leaves empty string alone" do
       expect(rewrite("")).to eq("")
