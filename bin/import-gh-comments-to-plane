@@ -198,9 +198,13 @@ GH_IMAGE_HOST_RE = %r{\Ahttps://(?:github\.com/user-attachments/assets/|
 # GFM-flavoured options matching GitHub's server-side renderer.
 # `header_ids: nil` suppresses the auto-generated <a id=...> anchors on
 # headings (Plane has no use for them and they pollute the rendering).
+# `hardbreaks: true` mirrors GitHub's renderer: a single `\n` inside a
+# paragraph becomes <br> rather than collapsing to a space. This
+# matches what users see on github.com (and our collapse_whitespace
+# pass leaves explicit <br> tags alone).
 COMMONMARKER_OPTS = {
   parse: { smart: false },
-  render: { hardbreaks: false, github_pre_lang: true, unsafe: true },
+  render: { hardbreaks: true, github_pre_lang: true, unsafe: true },
   extension: { header_ids: nil }
 }.freeze
 COMMONMARKER_PLUGINS = {
@@ -289,8 +293,11 @@ def collapse_whitespace(html)
     next if i.odd? # odd indices are the <pre>...</pre> blocks; preserve verbatim
 
     # Collapse runs of whitespace (including \n) to a single space, then
-    # remove that space where it sits between adjacent tags.
-    parts[i] = part.gsub(/\s+/, " ").gsub(/>\s+</, "><")
+    # remove that space where it sits between adjacent tags. Also strip
+    # whitespace immediately after a <br> tag — Commonmarker emits
+    # `<br />\n<text>` which would otherwise leave a leading space on
+    # the line after each hard-break.
+    parts[i] = part.gsub(/\s+/, " ").gsub(/>\s+</, "><").gsub(%r{(<br\s*/?>)\s+}, '\1')
   end
   parts.join
 end
