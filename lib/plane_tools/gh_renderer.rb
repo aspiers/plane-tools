@@ -48,11 +48,11 @@ module PlaneTools
     TABLE_CODE_FACTOR     = 1.10 # monospace <code> chars wider than regular
     TABLE_CODE_CHIP_PAD   = 12 # extra px for the <code> rounded chip styling
 
-    def self.render(gh_comment, image_rewriter:)
-      new.render(gh_comment, image_rewriter: image_rewriter)
+    def self.render(gh_comment, image_rewriter:, repo:)
+      new.render(gh_comment, image_rewriter: image_rewriter, repo: repo)
     end
 
-    def render(gh_comment, image_rewriter:)
+    def render(gh_comment, image_rewriter:, repo:)
       ts = gh_comment.created_at.strftime("%Y-%m-%d %H:%M UTC")
       # Note: clicking this link in Plane currently opens two browser
       # tabs - reproducible even on links authored inside Plane's own
@@ -61,8 +61,9 @@ module PlaneTools
       header = "<p><a href=\"#{gh_comment.html_url}\">" \
                "<em>#{gh_comment.user.login} wrote on GitHub on #{ts}</em>" \
                "</a></p>"
+      body_md = CrossRefLinker.rewrite(gh_comment.body.to_s, repo: repo)
       rendered = Commonmarker.to_html(
-        gh_comment.body.to_s, options: COMMONMARKER_OPTS, plugins: COMMONMARKER_PLUGINS
+        body_md, options: COMMONMARKER_OPTS, plugins: COMMONMARKER_PLUGINS
       ).strip
       rewritten = image_rewriter.call(rendered)
       with_widths = add_table_colwidths(rewritten)

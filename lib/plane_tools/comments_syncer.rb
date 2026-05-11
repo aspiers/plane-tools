@@ -41,7 +41,7 @@ module PlaneTools
       @github.issue_comments(repo, issue.number).each do |c|
         break if @limit_hit
 
-        process_one_comment(project, work_item, c, by_gh_id, image_rewriter, here)
+        process_one_comment(project, work_item, c, by_gh_id, image_rewriter, here, repo)
       end
 
       @log.info "  #{label}: posted=#{here.posted} patched=#{here.patched} " \
@@ -50,7 +50,7 @@ module PlaneTools
 
     private
 
-    def process_one_comment(project, work_item, c, by_gh_id, image_rewriter, here)
+    def process_one_comment(project, work_item, c, by_gh_id, image_rewriter, here, repo)
       cid = c.id.to_s
 
       if c.user&.type == "Bot"
@@ -59,7 +59,7 @@ module PlaneTools
         return
       end
 
-      rendered = GhRenderer.render(c, image_rewriter: image_rewriter)
+      rendered = GhRenderer.render(c, image_rewriter: image_rewriter, repo: repo)
       existing_plane = by_gh_id[cid]
 
       if existing_plane && existing_plane["created_by"] != @my_user_id
